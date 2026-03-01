@@ -1,0 +1,19 @@
+name: 'Setup Python and Poetry'
+description: 'Instala Python, Poetry y las dependencias del proyecto'
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13' # Ajustado a una versión estable de 2026
+
+    - name: Install Poetry
+      shell: bash
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Install dependencies
+      shell: bash
+      run: poetry install
