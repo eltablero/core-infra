@@ -1,0 +1,10 @@
+name: core-infra
+description: Infrastructura core para el proyecto eltablero
+runtime:
+  name: python
+  options:
+    toolchain: poetry
+config:
+  pulumi:tags:
+    value:
+      pulumi:template: azure-python
