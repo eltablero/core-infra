@@ -59,35 +59,7 @@ backend_app = containerapps.ContainerApp(
     ),
 )
 
-# 5. Frontend Service (React/Static)
-# Consumimos la URL del backend dinámicamente
-frontend_app = containerapps.ContainerApp(
-    "frontend-web",
-    resource_group_name=resource_group.name,
-    managed_environment_id=aca_env.id,
-    configuration=containerapps.ConfigurationArgs(
-        ingress=containerapps.IngressArgs(
-            external=True,
-            target_port=80,
-        ),
-    ),
-    template=containerapps.TemplateArgs(
-        containers=[containerapps.ContainerArgs(
-            name="react-frontend",
-            image="mcr.microsoft.com/azuredocs/containerapps-helloworld", # Reemplazar por tu imagen
-            env=[
-                containerapps.EnvironmentVarArgs(
-                    name="API_URL",
-                    value=backend_app.configuration.apply(lambda c: f"https://{c.ingress.fqdn}")
-                )
-            ],
-            resources=containerapps.ContainerResourcesArgs(cpu=0.5, memory="1Gi"),
-        )],
-    ),
-)
-
-# 6. Política WAF
-# 6. Política WAF (En cdn v3.14.0 el recurso se llama 'Policy')
+# 6. Politica WAF (En cdn v3.14.0 el recurso se llama Policy)
 waf_policy = cdn.Policy(
     "waf-policy",
     resource_group_name=resource_group.name,
@@ -101,17 +73,53 @@ waf_policy = cdn.Policy(
     custom_rules=cdn.CustomRuleListArgs(
         rules=[
             {
-                "name": "limitbackend",
+                "name": "rate-limit-api",
                 "priority": 1,
-                "ruleType": "RateLimitRule", # Nota el CamelCase, es el nombre real en la API de Azure
+                "ruleType": "RateLimitRule",
                 "action": "Block",
-                "rateLimitThreshold": 100,
+                "rateLimitThreshold": 1000,
                 "rateLimitDurationInMinutes": 1,
                 "matchConditions": [{
-                    "matchVariable": "RequestHeader",
-                    "selector": "Host",
-                    "operator": "Equal",
-                    "matchValue": [backend_app.configuration.apply(lambda c: c.ingress.fqdn)],
+                    "matchVariable": "RequestUri",
+                    "operator": "BeginsWith",
+                    "matchValue": ["/api"],
+                }]
+            },
+            {
+                "name": "rate-limit-frontend",
+                "priority": 2,
+                "ruleType": "RateLimitRule",
+                "action": "Block",
+                "rateLimitThreshold": 2000,
+                "rateLimitDurationInMinutes": 1,
+                "matchConditions": [{
+                    "matchVariable": "RequestUri",
+                    "operator": "NotBeginsWith",
+                    "matchValue": ["/api"],
+                }]
+            },
+            {
+                "name": "block-sql-injection",
+                "priority": 3,
+                "ruleType": "MatchRule",
+                "action": "Block",
+                "matchConditions": [{
+                    "matchVariable": "QueryString",
+                    "operator": "Contains",
+                    "matchValue": ["union", "select", "insert", "drop"],
+                    "transforms": ["Lowercase"],
+                }]
+            },
+            {
+                "name": "block-xss-attempts",
+                "priority": 4,
+                "ruleType": "MatchRule",
+                "action": "Block",
+                "matchConditions": [{
+                    "matchVariable": "QueryString",
+                    "operator": "Contains",
+                    "matchValue": ["<script", "javascript:", "onerror="],
+                    "transforms": ["Lowercase"],
                 }]
             }
         ]
@@ -150,8 +158,8 @@ fd_origin_group = cdn.AFDOriginGroup(
     ),
 )
 
-# 7.4 Origin (El Backend real)
-fd_origin = cdn.AFDOrigin(
+# 7.4 Origin para Backend
+fd_origin_backend = cdn.AFDOrigin(
     "fd-origin-backend",
     resource_group_name=resource_group.name,
     profile_name=fd_profile.name,
@@ -162,9 +170,87 @@ fd_origin = cdn.AFDOrigin(
     origin_host_header=backend_app.configuration.apply(lambda c: c.ingress.fqdn),
 )
 
-# 7.5 Ruta (Vincula el Endpoint con el Origin Group)
-fd_route = cdn.Route(
-    "fd-route",
+# 7.5 Rutas
+# Ruta para API Backend
+fd_route_api = cdn.Route(
+    "fd-route-api",
+    resource_group_name=resource_group.name,
+    profile_name=fd_profile.name,
+    endpoint_name=fd_endpoint.name,
+    origin_group=fd_origin_group.id,
+    supported_protocols=["Http", "Https"],
+    patterns_to_match=["/api/*"],
+    forwarding_protocol="HttpsOnly",
+    link_to_default_domain="Enabled",
+    https_redirect="Enabled",
+)
+
+# 7.6 Vinculacion de WAF (Security Policy)
+# En Standard/Premium, el WAF se vincula mediante una Security Policy
+security_policy = cdn.SecurityPolicy(
+    "fd-security-policy",
+    resource_group_name=resource_group.name,
+    profile_name=fd_profile.name,
+    parameters=cdn.SecurityPolicyWebApplicationFirewallParametersArgs(
+        type="WebApplicationFirewall",
+        waf_policy={"id": waf_policy.id},
+        associations=[
+            cdn.SecurityPolicyWebApplicationFirewallAssociationArgs(
+                domains=[cdn.ActivatedResourceReferenceArgs(id=fd_endpoint.id)],
+                patterns_to_match=["/api/*"],
+            ),
+        ],
+    ),
+)
+
+# 5. Frontend Service (React/Static)
+# Ahora que Front Door está definido, podemos usarlo para la URL de API
+frontend_app = containerapps.ContainerApp(
+    "frontend-web",
+    resource_group_name=resource_group.name,
+    managed_environment_id=aca_env.id,
+    configuration=containerapps.ConfigurationArgs(
+        ingress=containerapps.IngressArgs(
+            external=True,
+            target_port=80,
+        ),
+    ),
+    template=containerapps.TemplateArgs(
+        containers=[containerapps.ContainerArgs(
+            name="react-frontend",
+            image="mcr.microsoft.com/azuredocs/containerapps-helloworld", # Reemplazar por tu imagen
+            env=[
+                containerapps.EnvironmentVarArgs(
+                    name="API_URL",
+                    value=fd_endpoint.host_name.apply(lambda fqdn: f"https://{fqdn}/api")
+                ),
+                containerapps.EnvironmentVarArgs(
+                    name="WAF_PROTECTED",
+                    value="true"
+                )
+            ],
+            resources=containerapps.ContainerResourcesArgs(cpu=0.5, memory="1Gi"),
+        )],
+    ),
+    opts=pulumi.ResourceOptions(depends_on=[security_policy])
+)
+
+# 7.4b Origin para Frontend (para acceso directo sin WAF si es necesario)
+fd_origin_frontend = cdn.AFDOrigin(
+    "fd-origin-frontend",
+    resource_group_name=resource_group.name,
+    profile_name=fd_profile.name,
+    origin_group_name=fd_origin_group.name,
+    host_name=frontend_app.configuration.apply(lambda c: c.ingress.fqdn),
+    http_port=80,
+    https_port=443,
+    origin_host_header=frontend_app.configuration.apply(lambda c: c.ingress.fqdn),
+    opts=pulumi.ResourceOptions(depends_on=[frontend_app])
+)
+
+# 7.5b Ruta para Frontend
+fd_route_frontend = cdn.Route(
+    "fd-route-frontend",
     resource_group_name=resource_group.name,
     profile_name=fd_profile.name,
     endpoint_name=fd_endpoint.name,
@@ -174,25 +260,12 @@ fd_route = cdn.Route(
     forwarding_protocol="HttpsOnly",
     link_to_default_domain="Enabled",
     https_redirect="Enabled",
+    opts=pulumi.ResourceOptions(depends_on=[fd_origin_frontend])
 )
-
-# 7.6 Vinculación de WAF (Security Policy)
-# En Standard/Premium, el WAF se vincula mediante una Security Policy
-security_policy = cdn.SecurityPolicy(
-    "fd-security-policy",
-    resource_group_name=resource_group.name,
-    profile_name=fd_profile.name,
-    parameters=cdn.SecurityPolicyWebApplicationFirewallParametersArgs(
-        type="WebApplicationFirewall",
-        waf_policy={"id": waf_policy.id},
-        associations=[cdn.SecurityPolicyWebApplicationFirewallAssociationArgs(
-            domains=[cdn.ActivatedResourceReferenceArgs(id=fd_endpoint.id)],
-            patterns_to_match=["/*"],
-        )],
-    ),
-)
-
 
 # Outputs
 pulumi.export("backend_url", backend_app.configuration.apply(lambda c: c.ingress.fqdn))
 pulumi.export("frontend_url", frontend_app.configuration.apply(lambda c: c.ingress.fqdn))
+pulumi.export("front_door_url", fd_endpoint.host_name)
+pulumi.export("front_door_endpoint_id", fd_endpoint.id)
+pulumi.export("waf_policy_id", waf_policy.id)
