@@ -1,7 +1,6 @@
 name: Pulumi Deploy
 on:
   push:
-    # TODO: agregar rama de desarrollo
     branches: [ main ]
   pull_request:
     branches: [ main ]
@@ -12,10 +11,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
+      # Llamamos a nuestra acción reutilizable
+      - name: Prepare Environment
+        uses: ./.github/actions/setup-python-poetry
+
       - uses: pulumi/actions@v5
         with:
           command: preview
-          stack-name: dev # TODO: cambiar a prod cuando se cree ese ambiente
+          stack-name: eltablero/core-infra/dev
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -23,15 +27,20 @@ jobs:
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-jobs:
   up:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
+      # También la llamamos aquí para que Poetry esté disponible
+      - name: Prepare Environment
+        uses: ./.github/actions/setup-python-poetry
+
       - uses: pulumi/actions@v5
         with:
           command: up
-          stack-name: dev # TODO: cambiar a prod cuando se cree ese ambiente
+          stack-name: eltablero/core-infra/dev
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
