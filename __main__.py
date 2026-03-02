@@ -163,9 +163,11 @@ waf_policy = frontdoor.Policy(
 )
 
 # 7.1 Perfil de Front Door (Standard)
+# this SKU only supports a global location, so specify it explicitly.
 fd_profile = cdn.Profile(
     "frontdoor-profile",
     resource_group_name=resource_group.name,
+    location="Global",
     sku=cdn.SkuArgs(name="Standard_AzureFrontDoor"),
 )
 
