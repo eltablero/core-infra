@@ -270,6 +270,26 @@ semver = ">=2.8.1"
 typing-extensions = {version = ">=4.11,<5", markers = "python_version < \"3.11\""}
 
 [[package]]
+name = "pulumi-azure-native-frontdoor-v20240201"
+version = "3.14.0"
+description = "A specialized Pulumi Azure Native package for frontdoor v20240201"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = []
+develop = false
+
+[package.dependencies]
+parver = ">=0.2.1"
+pulumi = ">=3.165.0,<4.0.0"
+semver = ">=2.8.1"
+typing-extensions = {version = ">=4.11,<5", markers = "python_version < \"3.11\""}
+
+[package.source]
+type = "directory"
+url = "sdks/azure-native_frontdoor_v20240201"
+
+[[package]]
 name = "pyyaml"
 version = "6.0.3"
 description = "YAML parser and emitter for Python"
@@ -379,4 +399,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.10"
-content-hash = "e9835d6cf132dce3307b6f418f15a622051d65e7d9d8b6c95a0bbf9932a00b99"
+content-hash = "90c0d5a0bd06882ac290920e5c7b9db548295240091e093559f594b5a2f367e6"
