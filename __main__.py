@@ -3,19 +3,42 @@
 import pulumi
 
 from pulumi_azure_native import resources
+from pulumi_azure_native import containerregistry as acr
 import pulumi_azure_native.app as containerapps
 import pulumi_azure_native.operationalinsights as operationalinsights
 
 from pulumi_azure_native import cdn
+from pulumi_azure_native import authorization
 
 # Import the frontdoor WAF Policy from the generated local SDK.
 # Azure retired CDN WAF (cdn.Policy), so we use frontdoor.Policy instead.
 import pulumi_azure_native_frontdoor_v20240201.frontdoor as frontdoor
 
 # 1. Configuración y Grupo de Recursos
+#
+# El registro de contenedores y las versiones de imagen se definen en el
+# archivo de configuración (`Pulumi.<stack>.yaml` o un fichero custom que se
+# incluya en el repositorio).  Por ejemplo:
+#
+#   pulumi config set acrName miejemploacr
+#   pulumi config set imageTag v1.2.3
+#
+# Esto permite variar el valor sin tocar el código.
 config = pulumi.Config()
 stack = pulumi.get_stack()
+
+# dinámicos para el ACR y las etiquetas de las imágenes (se cargan mediante
+# `pulumi config set` en el repo).
+acr_name = config.require("acr-name")
+fn_core_bff_image_tag = config.require("fn-core-bff-image-tag")
+
 resource_group = resources.ResourceGroup(f"rg-poc-eltablero-{stack}")
+
+registry = acr.get_registry_output(
+    resource_group_name=resource_group.name,
+    registry_name=acr_name
+)
+
 
 # helper used to sanity‑check ARM resource IDs passed into the program.  Azure
 # strongly validates the "/subscriptions/.../providers/.../..." format and will
@@ -57,25 +80,29 @@ aca_env = containerapps.ManagedEnvironment(
     ),
 )
 
-# 4. Backend Service (FastAPI)
+# 4. core-bff (Backend API)
 backend_app = containerapps.ContainerApp(
-    "backend-api",
+    "core-bff",
     resource_group_name=resource_group.name,
     managed_environment_id=aca_env.id,
+    identity=containerapps.ManagedServiceIdentityArgs(
+        type="SystemAssigned",
+    ),
     configuration=containerapps.ConfigurationArgs(
-        ingress=containerapps.IngressArgs(
-            external=True,  # Permitir tráfico desde internet
-            target_port=8000,
-        ),
+        ingress=containerapps.IngressArgs(external=True, target_port=8000),
+        registries=[containerapps.RegistryCredentialsArgs(
+            server=registry.login_server,
+            identity="system" # Simplificado
+        )]
     ),
     template=containerapps.TemplateArgs(
-        containers=[
-            containerapps.ContainerArgs(
-                name="fastapi-backend",
-                image="mcr.microsoft.com/azuredocs/containerapps-helloworld",
-                resources=containerapps.ContainerResourcesArgs(cpu=0.5, memory="1Gi"),
-            )
-        ],
+        containers=[containerapps.ContainerArgs(
+            name="core-bff",
+            image=pulumi.Output.all(registry.login_server, fn_core_bff_image_tag).apply(
+                lambda args: f"{args[0]}/{args[1]}"
+            ),
+            resources=containerapps.ContainerResourcesArgs(cpu=0.5, memory="1Gi"),
+        )],
     ),
 )
 

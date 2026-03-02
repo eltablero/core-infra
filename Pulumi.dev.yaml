@@ -1,2 +1,10 @@
 config:
   azure-native:location: EastUS2
+  # El ACR debe existir previamente en el mismo subscription y resource group.
+  # Debe ser consistente con el nombre que aparezca en la consola. Esta actualización
+  # debe ser manual.
+
+  acr-name: eltablero
+  # Este valor debe ser consistente con el que se use en el pipeline de CI/CD para construir y etiquetar la imagen del backend.
+  # https://github.com/eltablero/core-bff/blob/main/.github/workflows/ci.yaml
+  fn-core-bff-image-tag: "eltablero-core-bff:174a64e6a292a2ee71bebae2761043207ae41642" 
