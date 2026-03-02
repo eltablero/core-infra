@@ -1,0 +1,10 @@
+{
+  "resource": true,
+  "name": "azure-native",
+  "version": "3.14.0",
+  "parameterization": {
+    "name": "azure-native_frontdoor_v20240201",
+    "version": "3.14.0",
+    "value": "ZXlKdGIyUjFiR1VpT2lKbWNtOXVkR1J2YjNJaUxDSjJaWEp6YVc5dUlqb2lkakl3TWpRd01qQXhJbjA9"
+  }
+}

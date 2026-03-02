@@ -12,3 +12,4 @@ package-mode = false
 pulumi = ">=3.0.0,<4.0.0"
 pulumi-azure-native = "^3.14.0"
 python = "^3.10"
+pulumi-azure-native-frontdoor-v20240201 = {path = "sdks/azure-native_frontdoor_v20240201"}

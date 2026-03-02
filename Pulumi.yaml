@@ -8,3 +8,10 @@ config:
   pulumi:tags:
     value:
       pulumi:template: azure-python
+packages:
+  azure-native_frontdoor_v20240201:
+    source: azure-native
+    version: 3.14.0
+    parameters:
+      - frontdoor
+      - "2024-02-01"
