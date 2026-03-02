@@ -1,7 +1,12 @@
 """An Azure RM Python Pulumi program"""
 
 import pulumi
-from pulumi_azure_native import resources, containerapps, operationalinsights, frontdoor
+
+from pulumi_azure_native import resources
+import pulumi_azure_native.app as containerapps 
+import pulumi_azure_native.operationalinsights as operationalinsights
+
+from pulumi_azure_native import cdn
 
 # 1. Configuración y Grupo de Recursos
 config = pulumi.Config()
@@ -15,6 +20,11 @@ workspace = operationalinsights.Workspace(
     sku=operationalinsights.WorkspaceSkuArgs(name="PerGB2018")
 )
 
+workspace_keys = operationalinsights.get_shared_keys_output(
+    resource_group_name=resource_group.name,
+    workspace_name=workspace.name
+)
+
 # 3. Azure Container Apps Environment
 # Este es el "clúster" lógico donde viven ambos contenedores
 aca_env = containerapps.ManagedEnvironment(
@@ -24,7 +34,7 @@ aca_env = containerapps.ManagedEnvironment(
         destination="log-analytics",
         log_analytics_configuration=containerapps.LogAnalyticsConfigurationArgs(
             customer_id=workspace.customer_id,
-            shared_key=workspace.primary_shared_key,
+            shared_key=workspace_keys.primary_shared_key,
         ),
     ),
 )
@@ -76,95 +86,109 @@ frontend_app = containerapps.ContainerApp(
     ),
 )
 
-# 6. política WAF con regla de rate‑limit
-waf = frontdoor.WebApplicationFirewallPolicy(
+# 6. Política WAF
+# 6. Política WAF (En cdn v3.14.0 el recurso se llama 'Policy')
+waf_policy = cdn.Policy(
     "waf-policy",
     resource_group_name=resource_group.name,
-    policy_settings=frontdoor.PolicySettingsArgs(
-        enabled=True,
-        mode="Prevention",  # o Detection
+    location="Global",
+    sku=cdn.SkuArgs(name="Standard_AzureFrontDoor"),
+    policy_settings=cdn.PolicySettingsArgs(
+        enabled_state="Enabled",
+        mode="Prevention",
+        default_custom_block_response_status_code=403,
     ),
-    custom_rules=[frontdoor.CustomRuleArgs(
-        name="limit-backend",
-        priority=1,
-        rule_type="RateLimitRule",
-        rate_limit_rule=frontdoor.RateLimitRuleArgs(
-            count=100,             # 100 requests
-            interval_in_minutes=1, # por minuto
-            action="Block",
-        ),
-        match_conditions=[frontdoor.MatchConditionArgs(
-            match_variables=[frontdoor.MatchVariableArgs(
-                variable_name="RequestHeaders",
-                selector="Host",
-            )],
-            operator="Equal",
-            values=["backend-api.${stack}.azurecontainerapps.io"],
-        )]
-    ), frontdoor.CustomRuleArgs(            # misma regla para frontend
-        name="limit-frontend",
-        priority=2,
-        rule_type="RateLimitRule",
-        rate_limit_rule=frontdoor.RateLimitRuleArgs(
-            count=200,
-            interval_in_minutes=1,
-            action="Block",
-        ),
-        match_conditions=[frontdoor.MatchConditionArgs(
-            match_variables=[frontdoor.MatchVariableArgs(
-                variable_name="RequestHeaders",
-                selector="Host",
-            )],
-            operator="Equal",
-            values=["frontend-web.${stack}.azurecontainerapps.io"],
-        )]
-    )]
+    custom_rules=cdn.CustomRuleListArgs(
+        rules=[
+            {
+                "name": "limitbackend",
+                "priority": 1,
+                "ruleType": "RateLimitRule", # Nota el CamelCase, es el nombre real en la API de Azure
+                "action": "Block",
+                "rateLimitThreshold": 100,
+                "rateLimitDurationInMinutes": 1,
+                "matchConditions": [{
+                    "matchVariable": "RequestHeader",
+                    "selector": "Host",
+                    "operator": "Equal",
+                    "matchValue": [backend_app.configuration.apply(lambda c: c.ingress.fqdn)],
+                }]
+            }
+        ]
+    )
 )
 
-# 7. Front Door que apunta a las dos apps y usa la WAF anterior
-fd = frontdoor.FrontDoor(
-    "frontdoor",
+# 7.1 Perfil de Front Door (Standard)
+fd_profile = cdn.Profile(
+    "frontdoor-profile",
     resource_group_name=resource_group.name,
-    routing_rules=[
-        frontdoor.RoutingRuleArgs(
-            name="backend-rule",
-            frontend_endpoints=["defaultFrontendEndpoint"],
-            accepted_protocols=["Http","Https"],
+    sku=cdn.SkuArgs(name="Standard_AzureFrontDoor"),
+)
+
+# 7.2 Endpoint (La URL de entrada)
+fd_endpoint = cdn.AFDEndpoint(
+    "fd-endpoint",
+    resource_group_name=resource_group.name,
+    profile_name=fd_profile.name,
+    enabled_state="Enabled",
+)
+
+# 7.3 Origin Group
+fd_origin_group = cdn.AFDOriginGroup(
+    "fd-origin-group",
+    resource_group_name=resource_group.name,
+    profile_name=fd_profile.name,
+    load_balancing_settings=cdn.LoadBalancingSettingsParametersArgs(
+        sample_size=4,
+        successful_samples_required=3,
+    ),
+    health_probe_settings=cdn.HealthProbeParametersArgs(
+        probe_path="/",
+        probe_protocol="Https",
+        probe_request_type="HEAD",
+        probe_interval_in_seconds=30,
+    ),
+)
+
+# 7.4 Origin (El Backend real)
+fd_origin = cdn.AFDOrigin(
+    "fd-origin-backend",
+    resource_group_name=resource_group.name,
+    profile_name=fd_profile.name,
+    origin_group_name=fd_origin_group.name,
+    host_name=backend_app.configuration.apply(lambda c: c.ingress.fqdn),
+    http_port=80,
+    https_port=443,
+    origin_host_header=backend_app.configuration.apply(lambda c: c.ingress.fqdn),
+)
+
+# 7.5 Ruta (Vincula el Endpoint con el Origin Group)
+fd_route = cdn.Route(
+    "fd-route",
+    resource_group_name=resource_group.name,
+    profile_name=fd_profile.name,
+    endpoint_name=fd_endpoint.name,
+    origin_group=fd_origin_group.id,
+    supported_protocols=["Http", "Https"],
+    patterns_to_match=["/*"],
+    forwarding_protocol="HttpsOnly",
+    link_to_default_domain="Enabled",
+    https_redirect="Enabled",
+)
+
+# 7.6 Vinculación de WAF (Security Policy)
+# En Standard/Premium, el WAF se vincula mediante una Security Policy
+security_policy = cdn.SecurityPolicy(
+    "fd-security-policy",
+    resource_group_name=resource_group.name,
+    profile_name=fd_profile.name,
+    parameters=cdn.SecurityPolicyWebApplicationFirewallParametersArgs(
+        type="WebApplicationFirewall",
+        waf_policy={"id": waf_policy.id},
+        associations=[cdn.SecurityPolicyWebApplicationFirewallAssociationArgs(
+            domains=[cdn.ActivatedResourceReferenceArgs(id=fd_endpoint.id)],
             patterns_to_match=["/*"],
-            forwarding_configuration=frontdoor.ForwardingConfigurationArgs(
-                backend_pool_name="backendPool",
-            ),
-        ),
-        frontdoor.RoutingRuleArgs(
-            name="frontend-rule",
-            frontend_endpoints=["defaultFrontendEndpoint"],
-            accepted_protocols=["Http","Https"],
-            patterns_to_match=["/app/*"],
-            forwarding_configuration=frontdoor.ForwardingConfigurationArgs(
-                backend_pool_name="frontendPool",
-            ),
-        ),
-    ],
-    backend_pools=[
-        frontdoor.BackendPoolArgs(
-            name="backendPool",
-            backends=[frontdoor.BackendArgs(
-                address=backend_app.configuration.apply(lambda c: c.ingress.fqdn),
-                http_port=80,
-                https_port=443,
-            )],
-        ),
-        frontdoor.BackendPoolArgs(
-            name="frontendPool",
-            backends=[frontdoor.BackendArgs(
-                address=frontend_app.configuration.apply(lambda c: c.ingress.fqdn),
-                http_port=80,
-                https_port=443,
-            )],
-        ),
-    ],
-    web_application_firewall_policy_link=frontdoor.WebApplicationFirewallPolicyLinkArgs(
-        id=waf.id,
+        )],
     ),
 )
 
