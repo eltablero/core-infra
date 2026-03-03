@@ -8,3 +8,5 @@ config:
   # Este valor debe ser consistente con el que se use en el pipeline de CI/CD para construir y etiquetar la imagen del backend.
   # https://github.com/eltablero/core-bff/blob/main/.github/workflows/ci.yaml
   fn-core-bff-image-tag: "eltablero-core-bff:174a64e6a292a2ee71bebae2761043207ae41642" 
+  # https://github.com/eltablero/core-fe/blob/main/.github/workflows/ci.yaml
+  fn-core-fe-image-tag: "eltablero-core-fe:27cc8df9c1e3287228692a5ad4c43e094f221059" 
