@@ -1,6 +1,7 @@
 """An Azure RM Python Pulumi program"""
 
 import pulumi
+import uuid
 
 from pulumi_azure_native import resources
 from pulumi_azure_native import containerregistry as acr
@@ -9,6 +10,7 @@ import pulumi_azure_native.operationalinsights as operationalinsights
 
 from pulumi_azure_native import cdn
 from pulumi_azure_native import authorization
+from pulumi_azure_native import managedidentity
 
 # Import the frontdoor WAF Policy from the generated local SDK.
 # Azure retired CDN WAF (cdn.Policy), so we use frontdoor.Policy instead.
@@ -31,11 +33,14 @@ stack = pulumi.get_stack()
 # `pulumi config set` en el repo).
 acr_name = config.require("acr-name")
 fn_core_bff_image_tag = config.require("fn-core-bff-image-tag")
+fn_core_fe_image_tag = config.require("fn-core-fe-image-tag")
 
 resource_group = resources.ResourceGroup(f"rg-poc-eltablero-{stack}")
 
+commons_rg_name = "commons" 
+
 registry = acr.get_registry_output(
-    resource_group_name=resource_group.name,
+    resource_group_name=commons_rg_name,
     registry_name=acr_name
 )
 
@@ -80,33 +85,38 @@ aca_env = containerapps.ManagedEnvironment(
     ),
 )
 
-# 4. core-bff (Backend API)
-backend_app = containerapps.ContainerApp(
-    "core-bff",
-    resource_group_name=resource_group.name,
-    managed_environment_id=aca_env.id,
-    identity=containerapps.ManagedServiceIdentityArgs(
-        type="SystemAssigned",
-    ),
-    configuration=containerapps.ConfigurationArgs(
-        ingress=containerapps.IngressArgs(external=True, target_port=8000),
-        registries=[containerapps.RegistryCredentialsArgs(
-            server=registry.login_server,
-            identity="system" # Simplificado
-        )]
-    ),
-    template=containerapps.TemplateArgs(
-        containers=[containerapps.ContainerArgs(
-            name="core-bff",
-            image=pulumi.Output.all(registry.login_server, fn_core_bff_image_tag).apply(
-                lambda args: f"{args[0]}/{args[1]}"
-            ),
-            resources=containerapps.ContainerResourcesArgs(cpu=0.5, memory="1Gi"),
-        )],
-    ),
+# Compute role assignment metadata early so we can include assignment in app's image dependency.
+# This forces Pulumi to wait for the role assignment before deploying the app.
+subscription_id = resource_group.id.apply(lambda i: i.split("/")[2])
+role_def_id = subscription_id.apply(
+    # El código de rol "AcrPull" se obtuvo con el siguiente comando de Azure CLI:
+    # az role definition list --name "AcrPull" --query "[].name" -o tsv
+    lambda sub: f"/subscriptions/{sub}/providers/Microsoft.Authorization/roleDefinitions/7f951dda-4ed3-4680-a7ca-43fe172d538d"
 )
 
-# 6. Politica WAF — using frontdoor.Policy (azure-native frontdoor module).
+# Use a user-assigned managed identity to avoid race conditions. Create the
+# identity first, grant AcrPull to it, then create the ContainerApp that uses it.
+uai = managedidentity.UserAssignedIdentity(
+    "core-uai",
+    resource_group_name=resource_group.name,
+)
+
+# Deterministic role assignment name
+role_assignment_name = pulumi.Output.all(
+    registry.id, uai.principal_id
+).apply(lambda args: str(uuid.uuid5(uuid.NAMESPACE_URL, args[0] + args[1])))
+
+acr_assignment = authorization.RoleAssignment(
+    "core-acr-pull",
+    scope=registry.id,
+    role_definition_id=role_def_id,
+    principal_id=uai.principal_id,
+    principal_type="ServicePrincipal",
+    role_assignment_name=role_assignment_name,
+)
+
+
+# 4. Politica WAF — using frontdoor.Policy (azure-native frontdoor module).
 # Azure retired cdn.Policy (CDN WAF), so this resource must live under the
 # frontdoor namespace instead.
 # explicitly set the Azure name rather than relying on the Pulumi
@@ -189,7 +199,7 @@ waf_policy = frontdoor.Policy(
     ),
 )
 
-# 7.1 Perfil de Front Door (Standard)
+# 4.1 Perfil de Front Door (Standard)
 # this SKU only supports a global location, so specify it explicitly.
 fd_profile = cdn.Profile(
     "frontdoor-profile",
@@ -198,7 +208,7 @@ fd_profile = cdn.Profile(
     sku=cdn.SkuArgs(name="Standard_AzureFrontDoor"),
 )
 
-# 7.2 Endpoint (La URL de entrada)
+# 4.2 Endpoint (La URL de entrada)
 fd_endpoint = cdn.AFDEndpoint(
     "fd-endpoint",
     resource_group_name=resource_group.name,
@@ -206,7 +216,7 @@ fd_endpoint = cdn.AFDEndpoint(
     enabled_state="Enabled",
 )
 
-# 7.3 Origin Groups (separate for backend and frontend routing)
+# 4.3 Origin Groups (separate for backend and frontend routing)
 fd_origin_group_backend = cdn.AFDOriginGroup(
     "fd-origin-group-backend",
     resource_group_name=resource_group.name,
@@ -216,7 +226,7 @@ fd_origin_group_backend = cdn.AFDOriginGroup(
         successful_samples_required=3,
     ),
     health_probe_settings=cdn.HealthProbeParametersArgs(
-        probe_path="/",
+        probe_path="/health",
         probe_protocol=cdn.ProbeProtocol.HTTPS,
         probe_request_type=cdn.HealthProbeRequestType.HEAD,
         probe_interval_in_seconds=30,
@@ -239,43 +249,7 @@ fd_origin_group_frontend = cdn.AFDOriginGroup(
     ),
 )
 
-# 7.4 Origin para Backend
-fd_origin_backend = cdn.AFDOrigin(
-    "fd-origin-backend",
-    resource_group_name=resource_group.name,
-    profile_name=fd_profile.name,
-    origin_group_name=fd_origin_group_backend.name,
-    host_name=backend_app.configuration.apply(
-        lambda c: c.ingress.fqdn if c and c.ingress else ""
-    ),
-    http_port=80,
-    https_port=443,
-    origin_host_header=backend_app.configuration.apply(
-        lambda c: c.ingress.fqdn if c and c.ingress else ""
-    ),
-)
-
-# 7.5 Rutas
-# Ruta para API Backend.
-# depends_on ensures the origin is fully provisioned before the route is
-# created, which avoids the "origin group has no enabled origins" error.
-fd_route_api = cdn.Route(
-    "fd-route-api",
-    resource_group_name=resource_group.name,
-    profile_name=fd_profile.name,
-    endpoint_name=fd_endpoint.name,
-    origin_group=cdn.ResourceReferenceArgs(
-        id=fd_origin_group_backend.id,
-    ),
-    supported_protocols=["Http", "Https"],
-    patterns_to_match=["/api/*"],
-    forwarding_protocol="HttpsOnly",
-    link_to_default_domain="Enabled",
-    https_redirect="Enabled",
-    opts=pulumi.ResourceOptions(depends_on=[fd_origin_backend]),
-)
-
-# 7.6 Vinculacion de WAF (Security Policy)
+# 4.4 Vinculacion de WAF (Security Policy)
 # En Standard/Premium, el WAF se vincula mediante una Security Policy
 security_policy = cdn.SecurityPolicy(
     "fd-security-policy",
@@ -294,23 +268,111 @@ security_policy = cdn.SecurityPolicy(
     ),
 )
 
-# 5. Frontend Service (React/Static)
-# Ahora que Front Door está definido, podemos usarlo para la URL de API
-frontend_app = containerapps.ContainerApp(
-    "frontend-web",
+# 5. Backend Service (Python FastAPI)
+# Build the final image and include the assignment id to enforce ordering.
+final_image_core_bff = pulumi.Output.all(
+    registry.login_server,
+    fn_core_bff_image_tag,
+    acr_assignment.id,
+).apply(lambda args: f"{args[0]}/{args[1]}")
+
+# Create the Container App using the user-assigned identity
+backend_app = containerapps.ContainerApp(
+    "core-bff",
     resource_group_name=resource_group.name,
     managed_environment_id=aca_env.id,
+    identity=containerapps.ManagedServiceIdentityArgs(
+        type="UserAssigned",
+        user_assigned_identities=pulumi.Output.all(uai.id).apply(lambda args: {args[0]: {}}),
+    ),
+    configuration=containerapps.ConfigurationArgs(
+        ingress=containerapps.IngressArgs(external=True, target_port=8000),
+        registries=[containerapps.RegistryCredentialsArgs(
+            server=registry.login_server,
+            identity=uai.id,
+        )]
+    ),
+    template=containerapps.TemplateArgs(
+        containers=[containerapps.ContainerArgs(
+            name="core-bff",
+            image=final_image_core_bff,
+            resources=containerapps.ContainerResourcesArgs(cpu=0.5, memory="1Gi"),
+        )],
+    ),
+    opts=pulumi.ResourceOptions(depends_on=[security_policy, acr_assignment])
+)
+
+# 5.1 Origin para Backend
+fd_origin_backend = cdn.AFDOrigin(
+    "fd-origin-backend",
+    resource_group_name=resource_group.name,
+    profile_name=fd_profile.name,
+    origin_group_name=fd_origin_group_backend.name,
+    host_name=backend_app.configuration.apply(
+        lambda c: c.ingress.fqdn if c and c.ingress else ""
+    ),
+    http_port=80,
+    https_port=443,
+    origin_host_header=backend_app.configuration.apply(
+        lambda c: c.ingress.fqdn if c and c.ingress else ""
+    ),
+    opts=pulumi.ResourceOptions(depends_on=[backend_app]),
+)
+
+# 5.2 Ruta para API Backend.
+# depends_on ensures the origin is fully provisioned before the route is
+# created, which avoids the "origin group has no enabled origins" error.
+fd_route_api = cdn.Route(
+    "fd-route-api",
+    resource_group_name=resource_group.name,
+    profile_name=fd_profile.name,
+    endpoint_name=fd_endpoint.name,
+    origin_group=cdn.ResourceReferenceArgs(
+        id=fd_origin_group_backend.id,
+    ),
+    supported_protocols=["Http", "Https"],
+    patterns_to_match=["/api/*"],
+    forwarding_protocol="HttpsOnly",
+    link_to_default_domain="Enabled",
+    https_redirect="Enabled",
+    opts=pulumi.ResourceOptions(depends_on=[fd_origin_backend]),
+)
+
+# 6. Frontend Service (Elm)
+# Ahora que Front Door está definido, podemos usarlo para la URL de API
+
+# Build the final image and include the assignment id to enforce ordering.
+final_image_core_fe = pulumi.Output.all(
+    registry.login_server,
+    fn_core_fe_image_tag,
+    acr_assignment.id,
+).apply(lambda args: f"{args[0]}/{args[1]}")
+
+frontend_app = containerapps.ContainerApp(
+    "core-fe",
+    resource_group_name=resource_group.name,
+    managed_environment_id=aca_env.id,
+    identity=containerapps.ManagedServiceIdentityArgs(
+        type="UserAssigned",
+        user_assigned_identities=pulumi.Output.all(uai.id).apply(lambda args: {args[0]: {}}),
+    ),
     configuration=containerapps.ConfigurationArgs(
         ingress=containerapps.IngressArgs(
             external=True,
             target_port=80,
         ),
+        registries=[
+            containerapps.RegistryCredentialsArgs(
+                server=registry.login_server,
+                identity=uai.id,
+            )
+        ]
     ),
     template=containerapps.TemplateArgs(
         containers=[
             containerapps.ContainerArgs(
-                name="react-frontend",
-                image="mcr.microsoft.com/azuredocs/containerapps-helloworld",
+                name="core-fe",
+                image=final_image_core_fe,
                 env=[
                     containerapps.EnvironmentVarArgs(
                         name="API_URL",
@@ -327,10 +389,10 @@ frontend_app = containerapps.ContainerApp(
             )
         ],
     ),
-    opts=pulumi.ResourceOptions(depends_on=[security_policy]),
+    opts=pulumi.ResourceOptions(depends_on=[security_policy, acr_assignment]),
 )
 
-# 7.4b Origin para Frontend (para acceso directo sin WAF si es necesario)
+# 6.1 Origin para Frontend (para acceso directo sin WAF si es necesario)
 fd_origin_frontend = cdn.AFDOrigin(
     "fd-origin-frontend",
     resource_group_name=resource_group.name,
@@ -347,7 +409,7 @@ fd_origin_frontend = cdn.AFDOrigin(
     opts=pulumi.ResourceOptions(depends_on=[frontend_app]),
 )
 
-# 7.5b Ruta para Frontend
+# 6.2 Ruta para Frontend
 fd_route_frontend = cdn.Route(
     "fd-route-frontend",
     resource_group_name=resource_group.name,
@@ -379,5 +441,4 @@ pulumi.export(
 )
 pulumi.export("front_door_url", fd_endpoint.host_name)
 pulumi.export("front_door_endpoint_id", expect_arm_id(fd_endpoint.id))
-
 pulumi.export("waf_policy_id", expect_arm_id(waf_policy.id))
