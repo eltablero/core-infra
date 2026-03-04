@@ -11,8 +11,6 @@ import pulumi_azure_native.operationalinsights as operationalinsights
 from pulumi_azure_native import cdn
 from pulumi_azure_native import authorization
 from pulumi_azure_native import managedidentity
-from pulumi_azure_native import network, privatedns
-from pulumi_azure_native import dbforpostgresql as postgresql
 
 # Import the frontdoor WAF Policy from the generated local SDK.
 # Azure retired CDN WAF (cdn.Policy), so we use frontdoor.Policy instead.
@@ -73,46 +71,11 @@ workspace_keys = operationalinsights.get_shared_keys_output(
     workspace_name=workspace.name,
 )
 
-# 2.1 Virtual Network para aislar la base de datos
-vnet = network.VirtualNetwork(
-    "vnet-core",
-    resource_group_name=resource_group.name,
-    address_space=network.AddressSpaceArgs(address_prefixes=["10.0.0.0/16"]),
-)
-
-# Subnet para Azure Container Apps Environment
-aca_subnet = network.Subnet(
-    "subnet-aca",
-    resource_group_name=resource_group.name,
-    virtual_network_name=vnet.name,
-    address_prefix="10.0.1.0/24",
-    delegations=[network.DelegationArgs(
-        name="aca-delegation",
-        service_name="Microsoft.App/environments",
-    )],
-)
-
-# Subnet para PG Private Endpoint
-sql_subnet = network.Subnet(
-    "subnet-sql",
-    resource_group_name=resource_group.name,
-    virtual_network_name=vnet.name,
-    address_prefix="10.0.2.0/24",
-    delegations=[network.DelegationArgs(
-        name="postgresql-delegation",
-        service_name="Microsoft.DBforPostgreSQL/flexibleServers",
-    )],
-)
-
-
 # 3. Azure Container Apps Environment
 # Este es el "clúster" lógico donde viven ambos contenedores
 aca_env = containerapps.ManagedEnvironment(
     "aca-env",
     resource_group_name=resource_group.name,
-    vnet_configuration=containerapps.VnetConfigurationArgs(
-        infrastructure_subnet_id=aca_subnet.id,
-    ),
     app_logs_configuration=containerapps.AppLogsConfigurationArgs(
         destination="log-analytics",
         log_analytics_configuration=containerapps.LogAnalyticsConfigurationArgs(
@@ -305,87 +268,7 @@ security_policy = cdn.SecurityPolicy(
     ),
 )
 
-# 5. Base de Datos PostgreSQL Flexible Server (accesible solo desde el backend)
-
-sql_database_name = config.require("sql-database-name")
-
-# 5.1 Zona DNS Privada para PostgreSQL Flexible Server
-private_dns_zone = privatedns.PrivateZone(
-    "sql-dns-zone",
-    resource_group_name=resource_group.name,
-    private_zone_name="privatelink.postgres.database.azure.com",
-    location="global",
-)
-
-# Vincular la zona DNS a tu VNet
-dns_vnet_link = privatedns.VirtualNetworkLink(
-    "sql-dns-link",
-    resource_group_name=resource_group.name,
-    private_zone_name=private_dns_zone.name,
-    virtual_network=network.SubResourceArgs(id=vnet.id),
-    registration_enabled=False,
-    location="global",
-)
-
-# 5.2 PostgreSQL Flexible Server (Burstable, económico para pruebas)
-pg_admin_password = config.require_secret("pg-admin-password")
-
-pg_server = postgresql.Server(
-    "pg-server",
-    resource_group_name=resource_group.name,
-    administrator_login="pgadmin",
-    administrator_login_password=pg_admin_password,
-    version=postgresql.PostgresMajorVersion.POSTGRES_MAJOR_VERSION_16,
-    create_mode=postgresql.CreateMode.CREATE,
-    sku=postgresql.SkuArgs(
-        name="Standard_B1ms",
-        tier=postgresql.SkuTier.BURSTABLE,
-    ),
-    storage=postgresql.StorageArgs(
-        storage_size_gb=32,
-    ),
-    backup=postgresql.BackupArgs(
-        backup_retention_days=7,
-        geo_redundant_backup=postgresql.GeographicallyRedundantBackup.DISABLED,
-    ),
-    high_availability=postgresql.HighAvailabilityArgs(
-        mode=postgresql.PostgreSqlFlexibleServerHighAvailabilityMode.DISABLED,
-    ),
-    network=postgresql.NetworkArgs(
-        delegated_subnet_resource_id=sql_subnet.id,
-        private_dns_zone_arm_resource_id=private_dns_zone.id,
-    ),
-    opts=pulumi.ResourceOptions(depends_on=[dns_vnet_link]),
-)
-
-# 5.3 Base de datos
-pg_database = postgresql.Database(
-    "pg-database",
-    resource_group_name=resource_group.name,
-    server_name=pg_server.name,
-    database_name=sql_database_name,
-    charset="utf8",
-    collation="en_US.utf8",
-)
-
-# 5.4 Firewall Rule para servicios de Azure
-firewall_rule_azure_services = postgresql.FirewallRule(
-    "firewall-allow-azure",
-    resource_group_name=resource_group.name,
-    server_name=pg_server.name,
-    start_ip_address="0.0.0.0",
-    end_ip_address="0.0.0.0",
-)
-
-# 5.5 Cadena de conexión para el backend
-sql_connection_string = pulumi.Output.all(
-    pg_server.fully_qualified_domain_name,
-    sql_database_name,
-).apply(
-    lambda args: f"Host={args[0]};Database={args[1]};Username=pgadmin;Password={{pg_password}};SslMode=Require;"
-)
-
-# 6. Backend Service (Python FastAPI)
+# 5. Backend Service (Python FastAPI)
 # Build the final image and include the assignment id to enforce ordering.
 final_image_core_bff = pulumi.Output.all(
     registry.login_server,
@@ -413,19 +296,13 @@ backend_app = containerapps.ContainerApp(
         containers=[containerapps.ContainerArgs(
             name="core-bff",
             image=final_image_core_bff,
-            env=[
-                containerapps.EnvironmentVarArgs(
-                    name="DATABASE_CONNECTION_STRING",
-                    value=sql_connection_string,
-                ),
-            ],
             resources=containerapps.ContainerResourcesArgs(cpu=0.5, memory="1Gi"),
         )],
     ),
-    opts=pulumi.ResourceOptions(depends_on=[security_policy, acr_assignment, pg_database])
+    opts=pulumi.ResourceOptions(depends_on=[security_policy, acr_assignment])
 )
 
-# 6.1 Origin para Backend
+# 5.1 Origin para Backend
 fd_origin_backend = cdn.AFDOrigin(
     "fd-origin-backend",
     resource_group_name=resource_group.name,
@@ -442,7 +319,7 @@ fd_origin_backend = cdn.AFDOrigin(
     opts=pulumi.ResourceOptions(depends_on=[backend_app]),
 )
 
-# 6.2 Ruta para API Backend.
+# 5.2 Ruta para API Backend.
 # depends_on ensures the origin is fully provisioned before the route is
 # created, which avoids the "origin group has no enabled origins" error.
 fd_route_api = cdn.Route(
@@ -461,7 +338,7 @@ fd_route_api = cdn.Route(
     opts=pulumi.ResourceOptions(depends_on=[fd_origin_backend]),
 )
 
-# 7. Frontend Service (Elm)
+# 6. Frontend Service (Elm)
 # Ahora que Front Door está definido, podemos usarlo para la URL de API
 
 # Build the final image and include the assignment id to enforce ordering.
@@ -515,7 +392,7 @@ frontend_app = containerapps.ContainerApp(
     opts=pulumi.ResourceOptions(depends_on=[security_policy, acr_assignment]),
 )
 
-# 7.1 Origin para Frontend (para acceso directo sin WAF si es necesario)
+# 6.1 Origin para Frontend (para acceso directo sin WAF si es necesario)
 fd_origin_frontend = cdn.AFDOrigin(
     "fd-origin-frontend",
     resource_group_name=resource_group.name,
@@ -532,7 +409,7 @@ fd_origin_frontend = cdn.AFDOrigin(
     opts=pulumi.ResourceOptions(depends_on=[frontend_app]),
 )
 
-# 7.2 Ruta para Frontend
+# 6.2 Ruta para Frontend
 fd_route_frontend = cdn.Route(
     "fd-route-frontend",
     resource_group_name=resource_group.name,
@@ -548,7 +425,6 @@ fd_route_frontend = cdn.Route(
     https_redirect="Enabled",
     opts=pulumi.ResourceOptions(depends_on=[fd_origin_frontend]),
 )
-
 
 # Outputs
 pulumi.export(
@@ -566,6 +442,3 @@ pulumi.export(
 pulumi.export("front_door_url", fd_endpoint.host_name)
 pulumi.export("front_door_endpoint_id", expect_arm_id(fd_endpoint.id))
 pulumi.export("waf_policy_id", expect_arm_id(waf_policy.id))
-pulumi.export("pg_server_fqdn", pg_server.fully_qualified_domain_name)
-pulumi.export("pg_database_name", sql_database_name)
-pulumi.export("sql_connection_string", sql_connection_string)
