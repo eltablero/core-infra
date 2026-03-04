@@ -11,6 +11,7 @@ import pulumi_azure_native.operationalinsights as operationalinsights
 from pulumi_azure_native import cdn
 from pulumi_azure_native import authorization
 from pulumi_azure_native import managedidentity
+from pulumi_azure_native import sql
 
 # Import the frontdoor WAF Policy from the generated local SDK.
 # Azure retired CDN WAF (cdn.Policy), so we use frontdoor.Policy instead.
@@ -69,6 +70,38 @@ workspace = operationalinsights.Workspace(
 workspace_keys = operationalinsights.get_shared_keys_output(
     resource_group_name=resource_group.name,
     workspace_name=workspace.name,
+)
+
+# 3. Creamos la base de datos con servidor administrado
+# Nota: Cambia el nombre del servidor por uno único globalmente
+
+# TODO: En un escenario real, las credenciales no deberían estar hardcodeadas.
+core_db_admin_login = config.require("core-db-admin-login")
+core_db_admin_password = config.require_secret("core-db-admin-password")
+
+sql_server = sql.Server("sql-server-core",
+    resource_group_name=resource_group.name,
+    location=resource_group.location,
+    administrator_login=core_db_admin_login,
+    administrator_login_password=core_db_admin_password,
+    version="12.0")
+
+# 3a. Crear la Base de Datos Serverless
+serverless_db = sql.Database("core-db",
+    resource_group_name=resource_group.name,
+    server_name=sql_server.name,
+    location=sql_server.location,
+    # Configuración de SKU para Serverless
+    sku=sql.SkuArgs(
+        name="GP_S_Gen5_1",  # El "S" es obligatorio para Serverless
+        tier="GeneralPurpose",
+        family="Gen5",
+        capacity=1,  # vCores máximos
+    ),
+    # Parámetros específicos de Serverless
+    min_capacity=0.5,        # Mínimo de vCores (mientras está activa)
+    auto_pause_delay=60,      # Minutos de inactividad antes de pausar (-1 para deshabilitar)
+    max_size_bytes=2147483648 # Límite de 2GB
 )
 
 # 3. Azure Container Apps Environment
@@ -297,11 +330,35 @@ backend_app = containerapps.ContainerApp(
             name="core-bff",
             image=final_image_core_bff,
             resources=containerapps.ContainerResourcesArgs(cpu=0.5, memory="1Gi"),
+            env=[
+                containerapps.EnvironmentVarArgs(
+                    name="SQL_SERVER_ENDPOINT",
+                    value=sql_server.fully_qualified_domain_name,
+                ),
+                containerapps.EnvironmentVarArgs(
+                    name="DATABASE_NAME",
+                    value=serverless_db.name,
+                )
+            ],
         )],
     ),
-    opts=pulumi.ResourceOptions(depends_on=[security_policy, acr_assignment])
+    opts=pulumi.ResourceOptions(depends_on=[security_policy, acr_assignment, sql_server, serverless_db])
 )
 
+role_definition_sql_db_contributor = subscription_id.apply(
+    # El código de rol "AcrPull" se obtuvo con el siguiente comando de Azure CLI:
+    # az role definition list --name "SQL DB Contributor" --query "[].id" -o tsv
+    lambda sub: f"/subscriptions/{sub}/providers/Microsoft.Authorization/roleDefinitions/9b7fa17d-e63e-47b0-bb0a-15c516ac86ec"
+)
+
+# 2. Asignar el rol de "SQL DB Contributor" a la identidad de la App
+# El ID del rol para SQL DB Contributor es estándar en Azure
+sql_role_assignment = authorization.RoleAssignment("app-sql-role",
+    principal_id=backend_app.identity.principal_id,
+    principal_type=authorization.PrincipalType.SERVICE_PRINCIPAL,
+    role_definition_id=role_definition_sql_db_contributor,
+    scope=serverless_db.id
+)
 # 5.1 Origin para Backend
 fd_origin_backend = cdn.AFDOrigin(
     "fd-origin-backend",
@@ -442,3 +499,7 @@ pulumi.export(
 pulumi.export("front_door_url", fd_endpoint.host_name)
 pulumi.export("front_door_endpoint_id", expect_arm_id(fd_endpoint.id))
 pulumi.export("waf_policy_id", expect_arm_id(waf_policy.id))
+
+# Exportar los datos de conexión
+pulumi.export("server_name", sql_server.fully_qualified_domain_name)
+pulumi.export("database_name", serverless_db.name)
