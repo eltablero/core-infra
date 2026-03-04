@@ -1,12 +1,13 @@
 config:
-  azure-native:location: EastUS2
+  azure-native:location: EastUS
   # El ACR debe existir previamente en el mismo subscription y resource group.
   # Debe ser consistente con el nombre que aparezca en la consola. Esta actualización
   # debe ser manual.
-
-  acr-name: eltablero
-  # Este valor debe ser consistente con el que se use en el pipeline de CI/CD para construir y etiquetar la imagen del backend.
-  # https://github.com/eltablero/core-bff/blob/main/.github/workflows/ci.yaml
-  fn-core-bff-image-tag: "eltablero-core-bff:174a64e6a292a2ee71bebae2761043207ae41642" 
-  # https://github.com/eltablero/core-fe/blob/main/.github/workflows/ci.yaml
-  fn-core-fe-image-tag: "eltablero-core-fe:27cc8df9c1e3287228692a5ad4c43e094f221059" 
+  core-infra:acr-name: eltablero
+  core-infra:fn-core-bff-image-tag: eltablero-core-bff:174a64e6a292a2ee71bebae2761043207ae41642
+  core-infra:fn-core-fe-image-tag: eltablero-core-fe:27cc8df9c1e3287228692a5ad4c43e094f221059
+  # Configuración de SQL Database Serverless
+  # Nombre de la base de datos
+  core-infra:sql-database-name: eltablero_core_db
+  core-infra:pg-admin-password:
+    secure: AAABAJ7PWEIIjrbTpX5/4as2MoPCyZgMZOTqwZOUzMglIB4HQG3+S6Wwm138
