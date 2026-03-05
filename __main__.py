@@ -353,11 +353,15 @@ role_definition_sql_db_contributor = subscription_id.apply(
 
 # 2. Asignar el rol de "SQL DB Contributor" a la identidad de la App
 # El ID del rol para SQL DB Contributor es estándar en Azure
+# 2. Asignar el rol de "SQL DB Contributor" directamente a la UAI
 sql_role_assignment = authorization.RoleAssignment("app-sql-role",
-    principal_id=backend_app.identity.principal_id,
+    principal_id=uai.principal_id, 
     principal_type=authorization.PrincipalType.SERVICE_PRINCIPAL,
     role_definition_id=role_definition_sql_db_contributor,
-    scope=serverless_db.id
+    scope=serverless_db.id,
+    role_assignment_name=pulumi.Output.all(serverless_db.id, uai.principal_id).apply(
+        lambda args: str(uuid.uuid5(uuid.NAMESPACE_URL, f"{args[0]}-{args[1]}"))
+    )
 )
 # 5.1 Origin para Backend
 fd_origin_backend = cdn.AFDOrigin(
