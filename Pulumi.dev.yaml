@@ -1,12 +1,16 @@
 config:
-  azure-native:location: EastUS2
+  azure-native:location: CentralUS
   # El ACR debe existir previamente en el mismo subscription y resource group.
   # Debe ser consistente con el nombre que aparezca en la consola. Esta actualización
   # debe ser manual.
-
-  acr-name: eltablero
+  core-infra:acr-name: eltablero
   # Este valor debe ser consistente con el que se use en el pipeline de CI/CD para construir y etiquetar la imagen del backend.
   # https://github.com/eltablero/core-bff/blob/main/.github/workflows/ci.yaml
-  fn-core-bff-image-tag: "eltablero-core-bff:174a64e6a292a2ee71bebae2761043207ae41642" 
+  core-infra:fn-core-bff-image-tag: eltablero-core-bff:174a64e6a292a2ee71bebae2761043207ae41642
   # https://github.com/eltablero/core-fe/blob/main/.github/workflows/ci.yaml
-  fn-core-fe-image-tag: "eltablero-core-fe:27cc8df9c1e3287228692a5ad4c43e094f221059" 
+  core-infra:fn-core-fe-image-tag: eltablero-core-fe:27cc8df9c1e3287228692a5ad4c43e094f221059
+  core-infra:core-db-admin-login: eltableroadmin
+  core-infra:core-db-admin-password:
+    secure: v1:7QH30bS1yp7PBI7x:dnu5z0VYGhTDUEYtYVAXbj/YwE+wHJmCQbADb3XdN4emU2IEEbwtXsU=
+secretsprovider: azurekeyvault://eltableroiackv.vault.azure.net/keys/pulumi-encryption-key
+encryptedkey: VFc3WGhGYXAzQU9lajBBNkdjNnNQSGN4WldjSEJNMmtiTjhXQXpGamJ2bjE5VDJJeDZJU0FRaVJrazczbVdjYi1fOXdlQ0VRZWRPcWNhTVpBcU5oY19XQTY3dE9ZeUFSVThLSWZXTWN5Yi1UeWRQLVpBdGFFZHZPM05mVHNiVWdSblphZnZCN0dIUFNiVXRZWEROQk1Od2ZGR2k5X3EwUkhNNzZxdDVVbTZISzZ5eXVER2J1cl9wSFhlQTl6UG5rNXNLMzlWcEhWVzM1MTdFcC1NX0dxZllTdzR0dWFVZmVDUi1aV3pxY2s1cWw3RWh1cE1CLXFIVUxXR0cyU3RFR1ctNV9OZGItVjdaZkVFQWZCaUVMaW1TOWdHTmZxTmk3NUMwamJCYnNlSTdVQnZ1a2dXT2RGLWZrUVVPRXNSall6cDRQSTljdW8tY1ZPcFFMS3BSczdR
