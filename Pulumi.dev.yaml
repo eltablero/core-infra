@@ -6,7 +6,7 @@ config:
   core-infra:acr-name: eltablero
   # Este valor debe ser consistente con el que se use en el pipeline de CI/CD para construir y etiquetar la imagen del backend.
   # https://github.com/eltablero/core-bff/blob/main/.github/workflows/ci.yaml
-  core-infra:fn-core-bff-image-tag: eltablero-core-bff:174a64e6a292a2ee71bebae2761043207ae41642
+  core-infra:fn-core-bff-image-tag: eltablero-core-bff:019465ae6d0c1a5dc097b54e623c0e7691f1cba3
   # https://github.com/eltablero/core-fe/blob/main/.github/workflows/ci.yaml
   core-infra:fn-core-fe-image-tag: eltablero-core-fe:27cc8df9c1e3287228692a5ad4c43e094f221059
   core-infra:core-db-admin-login: eltableroadmin
