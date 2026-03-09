@@ -331,14 +331,12 @@ backend_app = containerapps.ContainerApp(
             image=final_image_core_bff,
             resources=containerapps.ContainerResourcesArgs(cpu=0.5, memory="1Gi"),
             env=[
-                containerapps.EnvironmentVarArgs(
-                    name="SQL_SERVER_ENDPOINT",
-                    value=sql_server.fully_qualified_domain_name,
-                ),
-                containerapps.EnvironmentVarArgs(
-                    name="DATABASE_NAME",
-                    value=serverless_db.name,
-                )
+                containerapps.EnvironmentVarArgs(name="VAULT_URL", value="https://eltableroiackv.vault.azure.net/"),
+                containerapps.EnvironmentVarArgs(name="DB_SERVER", value=sql_server.fully_qualified_domain_name),
+                containerapps.EnvironmentVarArgs(name="DB_NAME", value=serverless_db.name),
+                containerapps.EnvironmentVarArgs(name="DB_USER", value="eltableroadmin"),
+                containerapps.EnvironmentVarArgs(name="SECRET_NAME", value="database-password"),
+                containerapps.EnvironmentVarArgs(name="AZURE_CLIENT_ID", value=uai.client_id),
             ],
         )],
     ),
