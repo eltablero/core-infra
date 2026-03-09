@@ -148,6 +148,25 @@ acr_assignment = authorization.RoleAssignment(
     role_assignment_name=role_assignment_name,
 )
 
+# ID del rol "Key Vault Secrets User"
+
+kv_secrets_user_role_id = subscription_id.apply(
+    # El código de rol "AcrPull" se obtuvo con el siguiente comando de Azure CLI:
+    # az role definition list --name "Key Vault Secrets User" --query "[].id" -o tsv
+    lambda sub: f"/subscriptions/{sub}/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6"
+)
+
+kv_role_assignment = authorization.RoleAssignment("app-kv-role",
+    principal_id=uai.principal_id,
+    principal_type=authorization.PrincipalType.SERVICE_PRINCIPAL,
+    role_definition_id=kv_secrets_user_role_id,
+    scope=pulumi.Output.concat("/subscriptions/", subscription_id, "/resourceGroups/", commons_rg_name, "/providers/Microsoft.KeyVault/vaults/eltableroiackv"),
+    # Usamos un nombre determinista basado en el ID de la identidad y el recurso
+    role_assignment_name=pulumi.Output.all(uai.principal_id).apply(
+        lambda args: str(uuid.uuid5(uuid.NAMESPACE_URL, f"kv-access-{args[0]}"))
+    )
+)
+
 
 # 4. Politica WAF — using frontdoor.Policy (azure-native frontdoor module).
 # Azure retired cdn.Policy (CDN WAF), so this resource must live under the
