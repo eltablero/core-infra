@@ -160,7 +160,7 @@ kv_role_assignment = authorization.RoleAssignment("app-kv-role",
     principal_id=uai.principal_id,
     principal_type=authorization.PrincipalType.SERVICE_PRINCIPAL,
     role_definition_id=kv_secrets_user_role_id,
-    scope=pulumi.Output.concat("/subscriptions/", subscription_id, "/resourceGroups/", commons_rg_name.name, "/providers/Microsoft.KeyVault/vaults/eltableroiackv"),
+    scope=pulumi.Output.concat("/subscriptions/", subscription_id, "/resourceGroups/", commons_rg_name, "/providers/Microsoft.KeyVault/vaults/eltableroiackv"),
     # Usamos un nombre determinista basado en el ID de la identidad y el recurso
     role_assignment_name=pulumi.Output.all(uai.principal_id).apply(
         lambda args: str(uuid.uuid5(uuid.NAMESPACE_URL, f"kv-access-{args[0]}"))
